@@ -6,6 +6,9 @@
 #include <bitset>
 #include <array>
 
+// bitset is pretty incomplete so add my own functions
+
+
 struct instructionInfo {
 	int opcode;
 	int rs, rt, rd;
@@ -45,14 +48,12 @@ auto decode_bin_line(std::bitset<32> bin_line) {
 }
 
 template <int N>
-int sign_extend(int v) {
-	std::bitset<N> container = v;
-	if (container[N - 1] == 1) {
-		return -v;
-	}
-	else {
-		return v;
-	}
+std::bitset<32> sign_extend(std::bitset<N> v) {
+	int sign = v[N - 1];
+	v[N - 1] = 0;
+	std::bitset<32> value(v.to_string());
+	return value | std::bitset<32>(sign) << 31;
+
 }
 
 enum funct_type {
@@ -109,18 +110,18 @@ enum opcode_type {
 
 // processor state information
 struct {
-	std::array<int, 32> register_file;
-	std::map<int, std::bitset<32>> memory_file;
-	std::vector<std::bitset<32>> instruction_memory;
-	long pc;
+	std::bitset<32> register_file[32] = { };
+	std::map<int, std::bitset<32>> memory_file = { };
+	std::vector<std::bitset<32>> instruction_memory = { };
+	long pc = 0;
 
 	auto get_instruction() {
-		register_file.at(0) = 0;
+		register_file[0] = 0;
 		return instruction_memory.at(pc++);
 	}
 
 	auto& r(int n) {
-		return register_file.at(n);
+		return register_file[n];
 	}
 
 	auto& m(int n) {
@@ -145,12 +146,6 @@ int main(int argc, char* argv[]) {
 		exit(1);
 	}
 
-	// initialized our processor
-	mips_processor.register_file.fill(0);
-	mips_processor.memory_file.clear();
-	mips_processor.instruction_memory.clear();
-	mips_processor.pc = 0;
-
 	// load up instruction memory
 	std::string line;
 	while (std::getline(ifs, line)) {
@@ -173,28 +168,39 @@ int main(int argc, char* argv[]) {
 			is_i_type = true;
 		}
 
+		// used to index the register file
 		int rs, rt, rd;
 		rs = data.rs;
 		rd = data.rd;
 		rt = data.rt;
 
+		// sign extended to 32 bits
+		auto imm_16 = sign_extend<16>(data.imm);
+		auto imm_18 = sign_extend<18>(data.imm << 2);
+
+		// new value of pc for branch instruction
+		long new_pc = proc.pc + 1 + imm_18.to_ulong();
+
 		switch (data.opcode) {
 		case op_BEQ:
+			if (proc.r(rs) == proc.r(rt)) proc.pc = new_pc;
 			break;
 		case op_BNE:
+			if (proc.r(rs) != proc.r(rt)) proc.pc = new_pc;
 			break;
 		case op_BLEZ:
+			if (proc.r(rs) <= 0) proc.pc = new_pc;
 			break;
 		case op_BGTZ:
+			if (proc.r(rs) > 0) proc.pc = new_pc;
 			break;
 		case op_ADDI:
-			proc.r(rt) = proc.r(rs) + sign_extend<16>(data.imm);
-			break;
 		case op_ADDIU:
+			proc.r(rt) = proc.r(rs) + imm_16;
 			break;
 		case op_SLTI:
-			break;
 		case op_SLTIU:
+			proc.r(rt) = proc.r(rs) < imm_16 ? 1 : 0;
 			break;
 		case op_ANDI:
 			break;
