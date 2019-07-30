@@ -6,7 +6,70 @@
 #include <bitset>
 #include <array>
 
-// bitset is pretty incomplete so add my own functions
+// bitset is pretty incomplete so add my own
+// handles two's complement signage
+class mips_word : public std::bitset<32> {
+private:
+	const int width = 32;
+
+	mips_word complement() const {
+		return mips_word(~(*this)) + mips_word(1U);
+	}
+
+	bool sign() const {
+		return (*this)[width - 1];
+	}
+
+public:
+	mips_word() : std::bitset<32>(0) { };
+	mips_word(std::bitset<32> b) : std::bitset<32>(b) { };
+	mips_word(unsigned int v) : std::bitset<32>(v) { };
+
+	mips_word operator+(const mips_word& other) const {
+		mips_word sum;
+		for (int i = 0; i < width; ++i) {
+			int inner_sum = (int)(*this)[i] + (int)other[i];
+			
+			// handle carry out
+			if (inner_sum > 1) {
+				if(i != width - 1) sum[i + 1] = 1; // except for last bit
+				inner_sum = 0;
+			}
+
+			sum[i] = inner_sum;
+		}
+		return sum;
+	}
+
+	mips_word operator-(const mips_word& other) const {
+		return *this + other.complement();
+	}
+
+	bool operator<(const mips_word& other) const {
+		if (other == *this) return false;
+		return (*this - other).sign();
+	}
+
+	bool operator>(const mips_word& other) const {
+		if (other == *this) return false;
+		return (other - *this).sign();
+	}
+
+	bool operator<=(const mips_word& other) const {
+		return other == *this || *this < other;
+	}
+
+	bool operator>=(const mips_word& other) const {
+		return other == *this || *this > other;
+	}
+
+	mips_word& operator=(const mips_word& other) {
+		for (int i = 0; i < width; ++i) {
+			(*this)[i] = other[i];
+		}
+		return *this;
+	}
+};
 
 
 struct instructionInfo {
@@ -110,8 +173,8 @@ enum opcode_type {
 
 // processor state information
 struct {
-	std::bitset<32> register_file[32] = { };
-	std::map<int, std::bitset<32>> memory_file = { };
+	mips_word register_file[32] = { };
+	std::map<int, mips_word> memory_file = { };
 	std::vector<std::bitset<32>> instruction_memory = { };
 	long pc = 0;
 
