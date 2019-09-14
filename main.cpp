@@ -5,6 +5,7 @@
 #include <algorithm>
 #include <bitset>
 #include <array>
+#include <unordered_map>
 
 // bitset is pretty incomplete so add my own
 // handles two's complement signage
@@ -69,6 +70,27 @@ public:
 		}
 		return *this;
 	}
+
+	mips_word abs() {
+		return this->sign() ? this->complement() : (*this);
+	}
+
+	signed long to_slong() {
+		signed long v = static_cast<signed long>(this->abs().to_ulong());
+		return this->sign() ? -v : v;
+	}
+
+	mips_word signed_shift(int shamt) {
+		int sign = this->sign();
+		mips_word a = this->abs();
+		if (shamt > 0) {
+			a <<= shamt;
+		}
+		else {
+			a >>= shamt;
+		}
+		return mips_word(sign) << 31 | a;
+	}
 };
 
 
@@ -81,20 +103,29 @@ struct instructionInfo {
 	int imm;
 };
 
+
+/**
+ * Produces a constant expression bitmask
+ * the bitmask is right aligned so you can
+ * shift it to get it into any position required
+*/
 template <int N>
 class bitmask {
-	unsigned long mask = 0;
+	unsigned long mask = (~0U) >> (sizeof(unsigned long) * 8 - N);
 
 public:
-	bitmask() {
-		mask = (~0U) >> (sizeof(unsigned long) * 8 - N);
-	}
-
-	operator unsigned long() {
+	constexpr operator unsigned long() {
 		return mask;
 	}
 };
 
+
+/** 
+ * Unpacks a 32 bit number into a set of values
+ * according to the MIPS instruction format.
+ * The actual type of the instruction is not taken
+ * into consideration.
+*/
 auto decode_bin_line(std::bitset<32> bin_line) {
 	struct instructionInfo i;
 
@@ -110,13 +141,18 @@ auto decode_bin_line(std::bitset<32> bin_line) {
 	return i;
 }
 
+/** 
+ * Takes an N sized binary number and extends it
+ * to a 32 bit sized number while maintaining the 
+ * sign bit. Assuming the sign bit it at the Nth 
+ * bit
+ */
 template <int N>
 std::bitset<32> sign_extend(std::bitset<N> v) {
 	int sign = v[N - 1];
 	v[N - 1] = 0;
-	std::bitset<32> value(v.to_string());
+	std::bitset<32> value(v.to_ulong());
 	return value | std::bitset<32>(sign) << 31;
-
 }
 
 enum funct_type {
@@ -168,25 +204,38 @@ enum opcode_type {
 	op_LHU = 37,
 	op_SB = 40,
 	op_SH = 41,
-	op_SW = 43
+	op_SW = 43,
+
+	op_J = 2,
+	op_JAL = 3
 };
 
 // processor state information
 struct {
-	mips_word register_file[32] = { };
-	std::map<int, mips_word> memory_file = { };
-	std::vector<std::bitset<32>> instruction_memory = { };
-	long pc = 0;
+	mips_word register_file[32];
+	std::map<mips_word, std::bitset<8>> memory_file;
+	std::unordered_map<int, std::bitset<32>> instruction_memory;
 
-	auto get_instruction() {
+	// program counter
+	mips_word pc = 0;
+
+	// HI and LO registers
+	mips_word hi, lo;
+
+	// Advance by one clock cycle
+	auto step_proc() {
+		// r0 is always zero
 		register_file[0] = 0;
-		return instruction_memory.at(pc++);
+
+		return instruction_memory.at(pc.to_ulong());
 	}
 
+	// Accessor for registor file
 	auto& r(int n) {
 		return register_file[n];
 	}
 
+	// Accessor for memory file
 	auto& m(int n) {
 		return memory_file[n];
 	}
@@ -210,18 +259,23 @@ int main(int argc, char* argv[]) {
 	}
 
 	// load up instruction memory
-	std::string line;
-	while (std::getline(ifs, line)) {
-		std::bitset<32> bin_line(line);
-		mips_processor.instruction_memory.push_back(bin_line);
+	{
+		int n = 0;
+		std::string line;
+		while (std::getline(ifs, line)) {
+			std::bitset<32> bin_line(line);
+			mips_processor.instruction_memory.insert({ n, bin_line });
+			n += 4;
+		}
 	}
 
 	auto& proc = mips_processor;
-	int instruction_count = proc.instruction_memory.size();
+	int n_instruction_bytes = proc.instruction_memory.size() * 4;
 
+	// Main loop
 	// read and process instructions
-	while (proc.pc < instruction_count) {
-		auto data = decode_bin_line(proc.get_instruction());
+	while (proc.pc.abs() < n_instruction_bytes) {
+		auto data = decode_bin_line(proc.step_proc());
 		bool is_i_type = false, is_r_type = false;
 
 		if (data.opcode == 0) {
@@ -238,11 +292,12 @@ int main(int argc, char* argv[]) {
 		rt = data.rt;
 
 		// sign extended to 32 bits
-		auto imm_16 = sign_extend<16>(data.imm);
-		auto imm_18 = sign_extend<18>(data.imm << 2);
+		mips_word imm_16 = sign_extend<16>(data.imm);
+		mips_word imm_18 = sign_extend<18>(data.imm << 2);
+		mips_word uimm = data.imm;
 
 		// new value of pc for branch instruction
-		long new_pc = proc.pc + 1 + imm_18.to_ulong();
+		mips_word new_pc = proc.pc + 4 + imm_18;
 
 		switch (data.opcode) {
 		case op_BEQ:
@@ -262,16 +317,21 @@ int main(int argc, char* argv[]) {
 			proc.r(rt) = proc.r(rs) + imm_16;
 			break;
 		case op_SLTI:
+			proc.r(rt) = proc.r(rs).to_slong() < imm_16.to_slong() ? 1 : 0;
 		case op_SLTIU:
 			proc.r(rt) = proc.r(rs) < imm_16 ? 1 : 0;
 			break;
 		case op_ANDI:
+			proc.r(rt) = proc.r(rs) & uimm;
 			break;
 		case op_ORI:
+			proc.r(rt) = proc.r(rs) | uimm;
 			break;
 		case op_XORI:
+			proc.r(rt) = proc.r(rs) ^ uimm;
 			break;
 		case op_LUI:
+			proc.r(rt) = uimm << 16;
 			break;
 		case op_LB:
 			break;
@@ -289,7 +349,11 @@ int main(int argc, char* argv[]) {
 			break;
 		case op_SW:
 			break;
-
+		case op_J:
+			proc.pc = data.address << 2;
+			break;
+		case op_JAL:
+			break;
 		case 0:
 		default:
 			// Go to funct because it is r_type
@@ -303,28 +367,41 @@ int main(int argc, char* argv[]) {
 
 		switch (data.funct) {
 		case f_SLL:
+			proc.r(rd) = proc.r(rt) << data.shamt;
 			break;
 		case f_SRL:
+			proc.r(rd) = proc.r(rt) >> data.shamt;
 			break;
 		case f_SRA:
+			proc.r(rd) = proc.r(rt).signed_shift(-data.shamt);
 			break;
 		case f_SLLV:
+			proc.r(rd) = proc.r(rt) << proc.r(rs).to_ulong();
 			break;
 		case f_SRLV:
+			proc.r(rd) = proc.r(rt) >> proc.r(rs).to_ulong();
 			break;
 		case f_SRAV:
+			proc.r(rd) = proc.r(rt).signed_shift(-static_cast<signed long>(proc.r(rs).to_ulong()));
 			break;
 		case f_JR:
+			proc.pc = proc.r(rs).to_ulong() / 4;
 			break;
 		case f_JALR:
+			proc.r(rd) = proc.pc + 2;
+			proc.pc = proc.r(rs).to_ulong() / 4;
 			break;
 		case f_MFHI:
+			proc.r(rd) = proc.hi;
 			break;
 		case f_MTHI:
+			proc.hi = proc.r(rs);
 			break;
 		case f_MFLO:
+			proc.r(rd) = proc.lo;
 			break;
 		case f_MTLO:
+			proc.lo = proc.r(rs);
 			break;
 		case f_MULT:
 			break;
